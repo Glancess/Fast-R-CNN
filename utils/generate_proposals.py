@@ -4,7 +4,7 @@ import cv2
 import torch
 from tqdm import tqdm
 
-VOC_ROOT = "projects/Fast-R-CNN/dataset/data/VOCdevkit/VOC2007"
+VOC_ROOT = "/root/Fast-R-CNN/dataset/data/VOCdevkit/VOC2007"
 
 IMAGE_DIR = os.path.join(VOC_ROOT, "JPEGImages")
 
