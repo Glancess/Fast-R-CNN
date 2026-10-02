@@ -33,7 +33,7 @@ def getlabel(proposals, gt_boxes, gt_labels):
     return max_iou, matched_gt_idx, labels
 
 
-def sample_rois(labels, num_rois=64, fg_fraction=0.25):
+def sample_rois(labels, num_rois=64, fg_fraction=0.25, random_sample=True):
     """
     labels:
         > 0 : foreground
@@ -54,16 +54,12 @@ def sample_rois(labels, num_rois=64, fg_fraction=0.25):
     num_bg = num_rois - num_fg
     num_bg = min(num_bg, len(bg_indices))
 
-    selected_fg_indices = (
-        fg_indices[torch.randperm(len(fg_indices), device=labels.device)[:num_fg]]
-        if num_fg > 0
-        else labels.new_empty((0,), dtype=torch.long)
-    )
-    selected_bg_indices = (
-        bg_indices[torch.randperm(len(bg_indices), device=labels.device)[:num_bg]]
-        if num_bg > 0
-        else labels.new_empty((0,), dtype=torch.long)
-    )
+    # 训练时随机抽；验证时固定取前几个，保证每轮验证用同一批 RoI。
+    if random_sample:
+        fg_indices = fg_indices[torch.randperm(len(fg_indices), device=labels.device)]
+        bg_indices = bg_indices[torch.randperm(len(bg_indices), device=labels.device)]
+    selected_fg_indices = fg_indices[:num_fg]
+    selected_bg_indices = bg_indices[:num_bg]
     selected_indices = torch.cat([selected_fg_indices, selected_bg_indices])
     return selected_indices
 

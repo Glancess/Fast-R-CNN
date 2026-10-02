@@ -8,13 +8,15 @@ from dataset.dataset import FastRCNNVOCDataset
 from dataset.dataset import detection_collate_fn as voc_collate_fn
 from model import FastRCNN
 from engine.train_one_epoch import train_one_epoch
+from engine.evaluate_one_epoch import evaluate_one_epoch
 
 
 # 先保持最基础的单机训练设置，方便逐项理解。
 PROJECT_DIR = Path(__file__).resolve().parent
 DATA_ROOT = PROJECT_DIR / "dataset" / "data"
 PROPOSAL_DIR = DATA_ROOT / "VOCdevkit" / "VOC2007" / "SelectiveSearchProposals"
-CHECKPOINT_DIR = PROJECT_DIR / "checkpoints"
+# 和以前 trainval 训练得到的 checkpoints/last.pth 分开存放。
+CHECKPOINT_DIR = PROJECT_DIR / "checkpoints" / "train_only"
 EPOCHS = 10
 BATCH_SIZE = 2
 NUM_ROIS_PER_IMAGE = 64
@@ -215,30 +217,49 @@ def run_fake_demo():
 
 
 def train_voc():
-    # 当前 proposal 生成脚本保存的是 trainval 全集，每张图一个同名 .pt 文件。
-    dataset = FastRCNNVOCDataset(
+    # 只用 train 更新参数，val 只用于验证。proposal 文件仍可沿用 trainval 生成的。
+    train_dataset = FastRCNNVOCDataset(
         root=str(DATA_ROOT),
         proposal_dir=str(PROPOSAL_DIR),
-        image_set="trainval",
+        image_set="train",
         horizontal_flip=True,
     )
+    val_dataset = FastRCNNVOCDataset(
+        root=str(DATA_ROOT),
+        proposal_dir=str(PROPOSAL_DIR),
+        image_set="val",
+        horizontal_flip=False,
+    )
 
-    # 训练前一次性检查文件，避免跑到中途才发现某张图缺 proposal。
-    missing = []
-    for image_path in dataset.voc.images:
-        image_id = Path(image_path).stem
-        if not (PROPOSAL_DIR / (image_id + ".pt")).is_file():
-            missing.append(image_id)
-    if missing:
-        raise FileNotFoundError(
-            f"还缺 {len(missing)} 个 proposal 文件。"
-            f"例如 {missing[:5]}。请等服务器生成完再训练。"
-        )
+    train_ids = {Path(path).stem for path in train_dataset.voc.images}
+    val_ids = {Path(path).stem for path in val_dataset.voc.images}
+    if train_ids & val_ids:
+        raise ValueError("train 和 val 有重复图片，请检查划分文件")
 
-    dataloader = DataLoader(
-        dataset,
+    # train 和 val 都需要 proposal；启动前检查，避免训练到验证时才报错。
+    for split_name, split_dataset in (("train", train_dataset), ("val", val_dataset)):
+        missing = []
+        for image_path in split_dataset.voc.images:
+            image_id = Path(image_path).stem
+            if not (PROPOSAL_DIR / (image_id + ".pt")).is_file():
+                missing.append(image_id)
+        if missing:
+            raise FileNotFoundError(
+                f"{split_name} 还缺 {len(missing)} 个 proposal 文件。"
+                f"例如 {missing[:5]}。请等服务器生成完再训练。"
+            )
+
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
+        num_workers=2,
+        collate_fn=voc_collate_fn,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
         num_workers=2,
         collate_fn=voc_collate_fn,
     )
@@ -246,9 +267,11 @@ def train_voc():
     # RoI Pool 的现成算子在 CUDA / CPU 上运行；服务器优先使用 CUDA。
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("device:", device)
-    print("train images:", len(dataset))
+    print("train images:", len(train_dataset))
+    print("val images:", len(val_dataset))
 
     last_path = CHECKPOINT_DIR / "last.pth"
+    best_path = CHECKPOINT_DIR / "best.pth"
     resuming = RESUME and last_path.is_file()
     # 续训会立刻加载自己的权重，不必再下载 ImageNet 权重。
     model = FastRCNN(pretrained=not resuming).to(device)
@@ -261,11 +284,15 @@ def train_voc():
 
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     start_epoch = 0
+    best_val_loss = float("inf")
     if resuming:
         checkpoint = torch.load(last_path, map_location=device)
+        if checkpoint.get("train_set") != "train":
+            raise ValueError("这个 checkpoint 不是 train-only 训练的，不能用来续训")
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         start_epoch = checkpoint["epoch"] + 1
+        best_val_loss = checkpoint["best_val_loss"]
         print(f"从第 {start_epoch + 1} 轮继续训练")
 
     if start_epoch >= EPOCHS:
@@ -273,25 +300,39 @@ def train_voc():
         return
 
     for epoch in range(start_epoch, EPOCHS):
-        result = train_one_epoch(
+        train_result = train_one_epoch(
             model=model,
-            dataloader=dataloader,
+            dataloader=train_loader,
             optimizer=optimizer,
             device=device,
             num_rois_per_image=NUM_ROIS_PER_IMAGE,
             fg_fraction=0.25,
         )
-        print(f"Epoch [{epoch + 1}/{EPOCHS}]: {result}")
-
-        # 每轮保存最近一次的模型和优化器状态。下一步可以据此续训。
-        torch.save(
-            {
-                "epoch": epoch,
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-            },
-            last_path,
+        val_result = evaluate_one_epoch(
+            model=model,
+            dataloader=val_loader,
+            device=device,
+            num_rois_per_image=NUM_ROIS_PER_IMAGE,
         )
+        print(f"Epoch [{epoch + 1}/{EPOCHS}] train: {train_result}")
+        print(f"Epoch [{epoch + 1}/{EPOCHS}] val:   {val_result}")
+
+        # best 按 val loss 选；last 是最新一轮，用于续训。
+        is_best = val_result["loss"] < best_val_loss
+        if is_best:
+            best_val_loss = val_result["loss"]
+        checkpoint = {
+            "epoch": epoch,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "val_loss": val_result["loss"],
+            "best_val_loss": best_val_loss,
+            "train_set": "train",
+        }
+        torch.save(checkpoint, last_path)
+        if is_best:
+            torch.save(checkpoint, best_path)
+            print("val loss 降低，已保存 best.pth")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""用训练好的 last.pth 在一张 VOC 图片上做检测。"""
+"""用 train-only 模型在一张 VOC val 图片上做检测和画框。"""
 
 import sys
 
@@ -134,22 +134,24 @@ def main():
         raise ValueError("用法：python predict.py 图片序号，例如 python predict.py 0")
 
     image_index = int(sys.argv[1])
-    checkpoint_path = CHECKPOINT_DIR / "last.pth"
+    checkpoint_path = CHECKPOINT_DIR / "best.pth"
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"还没有训练好的 checkpoint：{checkpoint_path}")
 
     dataset = FastRCNNVOCDataset(
         root=str(DATA_ROOT),
         proposal_dir=str(PROPOSAL_DIR),
-        image_set="trainval",
+        image_set="val",
     )
     sample = dataset[image_index]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = FastRCNN(pretrained=False).to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device)
+    if checkpoint.get("train_set") != "train":
+        raise ValueError("这个 checkpoint 不是 train-only 训练的，不能用于 val 评估")
     model.load_state_dict(checkpoint["model"])
 
-    print("image_id:", sample["image_id"])
+    print("image_set: val, image_id:", sample["image_id"])
     detections = predict_one(
         model, sample["image"], sample["proposals"], device
     )
