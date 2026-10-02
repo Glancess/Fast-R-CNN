@@ -55,7 +55,7 @@ class FastRCNNVOCDataset(Dataset):
         self.proposal_dir = proposal_dir
 
         self.new_h = image_size[0]
-        self.new_w = image_size[1]
+        self.new_w = image_size[1]  # H=600, W=800
 
         # VGG16 ImageNet normalization
         self.normalize = Normalize(
