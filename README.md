@@ -13,7 +13,7 @@ dataset/data/VOCdevkit/VOC2007/
 ├── ImageSets/Main/trainval.txt
 └── SelectiveSearchProposals/
     ├── 000005.pt
-    └── ...
+    └── ...cd
 ```
 
 服务器正在运行的 `utils/generate_proposals.py` 会为 `trainval.txt` 中每张图保存一个同名 `.pt` 文件，每个文件是 `[N, 4]` 的张量，四列为原图坐标 `[x1, y1, x2, y2]`。训练代码直接读取这个格式，没有修改生成脚本。**请等所有 proposal 文件生成完再开始真实训练。** `main.py` 会在加载 VGG16 前检查是否缺文件，并列出缺失数量。

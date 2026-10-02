@@ -3,7 +3,9 @@
 import sys
 
 import torch
+from PIL import Image, ImageDraw
 from torchvision.ops import nms
+from torchvision.transforms.functional import to_pil_image
 
 from dataset.dataset import FastRCNNVOCDataset, VOC_CLASSES
 from main import DATA_ROOT, PROPOSAL_DIR, CHECKPOINT_DIR
@@ -85,6 +87,48 @@ def predict_one(model, image, proposals, device, score_threshold=0.5):
     return results
 
 
+def save_compare_image(sample, detections):
+    """左边画真实框，右边画预测框，保存一张对比图。"""
+    # Dataset 已把图片归一化；画图前先恢复到 0～1 的 RGB 范围。
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    image = (sample["image"].cpu() * std + mean).clamp(0, 1)
+    image = to_pil_image(image)
+
+    gt_image = image.copy()
+    pred_image = image.copy()
+    gt_draw = ImageDraw.Draw(gt_image)
+    pred_draw = ImageDraw.Draw(pred_image)
+
+    # GT、预测框都使用 Dataset 缩放后的坐标，和这里的图片尺寸一致。
+    for box, label in zip(sample["gt_boxes"], sample["gt_labels"]):
+        x1, y1, x2, y2 = [int(v) for v in box.tolist()]
+        name = VOC_CLASSES[label.item() - 1]
+        gt_draw.rectangle((x1, y1, x2, y2), outline="lime", width=3)
+        gt_draw.text((x1, max(0, y1 - 12)), name, fill="lime")
+
+    for detection in detections:
+        x1, y1, x2, y2 = [int(v) for v in detection["box"]]
+        name = detection["class"]
+        score = detection["score"]
+        pred_draw.rectangle((x1, y1, x2, y2), outline="red", width=3)
+        pred_draw.text(
+            (x1, max(0, y1 - 12)), f"{name} {score:.2f}", fill="red"
+        )
+
+    width, height = image.size
+    compare = Image.new("RGB", (width * 2, height + 24), "white")
+    compare.paste(gt_image, (0, 24))
+    compare.paste(pred_image, (width, 24))
+    title_draw = ImageDraw.Draw(compare)
+    title_draw.text((5, 5), "Ground Truth", fill="green")
+    title_draw.text((width + 5, 5), "Prediction", fill="red")
+
+    output_path = CHECKPOINT_DIR / f"{sample['image_id']}_compare.jpg"
+    compare.save(output_path)
+    return output_path
+
+
 def main():
     if len(sys.argv) != 2:
         raise ValueError("用法：python predict.py 图片序号，例如 python predict.py 0")
@@ -111,6 +155,8 @@ def main():
     )
     for detection in detections[:20]:
         print(detection)
+    output_path = save_compare_image(sample, detections)
+    print("对比图已保存：", output_path)
 
 
 if __name__ == "__main__":
