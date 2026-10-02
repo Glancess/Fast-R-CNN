@@ -10,6 +10,13 @@ def getlabel(proposals, gt_boxes, gt_labels):
     坐标格式均为:
     [x1, y1, x2, y2]
     """
+    if len(proposals) == 0:
+        empty = proposals.new_empty((0,))
+        return empty, empty.long(), empty.long()
+    if len(gt_boxes) == 0:
+        # 没有普通 GT 的图片由训练循环跳过，避免把 difficult 物体当背景。
+        raise ValueError("这张图片没有可训练的 GT，不能计算 proposal 的类别")
+
     ious = box_iou(proposals, gt_boxes)  # n x m
     max_iou, matched_gt_idx = ious.max(dim=1)
     # 沿着某一维压缩”意味着那一维会被消掉。
@@ -40,22 +47,23 @@ def sample_rois(labels, num_rois=64, fg_fraction=0.25):
     bg_indices = torch.where(labels == 0)[0]  # background indices
 
     num_fg = int(num_rois * fg_fraction)
+    # 小型演示时如果 num_rois < 4，向下取整可能变成 0 个前景。
+    if num_fg == 0 and fg_fraction > 0 and len(fg_indices) > 0:
+        num_fg = 1
     num_fg = min(num_fg, len(fg_indices))
     num_bg = num_rois - num_fg
     num_bg = min(num_bg, len(bg_indices))
 
     selected_fg_indices = (
-        fg_indices[torch.randperm(len(fg_indices))[:num_fg]]
+        fg_indices[torch.randperm(len(fg_indices), device=labels.device)[:num_fg]]
         if num_fg > 0
-        else torch.tensor([], dtype=torch.long)
+        else labels.new_empty((0,), dtype=torch.long)
     )
     selected_bg_indices = (
-        bg_indices[torch.randperm(len(bg_indices))[:num_bg]]
+        bg_indices[torch.randperm(len(bg_indices), device=labels.device)[:num_bg]]
         if num_bg > 0
-        else torch.tensor([], dtype=torch.long)
+        else labels.new_empty((0,), dtype=torch.long)
     )
-    print("Selected foreground indices:", selected_fg_indices)  # Debugging line
-    print("Selected background indices:", selected_bg_indices)  # Debugging line
     selected_indices = torch.cat([selected_fg_indices, selected_bg_indices])
     return selected_indices
 

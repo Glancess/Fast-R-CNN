@@ -78,6 +78,10 @@ def train_one_epoch(
             gt_labels = gt_labels_list[image_idx].to(device).long()
             # [M]
 
+            # 少数图片可能只有 difficult 物体；这时没有可用 GT，就跳过。
+            if len(gt_boxes) == 0 or len(proposals) == 0:
+                continue
+
             # -----------------------------------------------------
             # 2.1 proposal 与所有 GT 算 IoU
             #
@@ -246,24 +250,22 @@ def train_one_epoch(
 
         num_batches += 1
 
-        print(
-            f"Batch [{batch_idx + 1}/{len(dataloader)}] "
-            f"RoIs: {len(rois)} | "
-            f"Loss: {loss.item():.4f} | "
-            f"Cls: {cls_loss.item():.4f} | "
-            f"BBox: {bbox_loss.item():.4f}"
-        )
+        # 每 50 个 batch 打印一次，避免真实数据训练时刷屏。
+        if (batch_idx + 1) % 50 == 0 or batch_idx + 1 == len(dataloader):
+            print(
+                f"Batch [{batch_idx + 1}/{len(dataloader)}] "
+                f"RoIs: {len(rois)} | "
+                f"Loss: {loss.item():.4f} | "
+                f"Cls: {cls_loss.item():.4f} | "
+                f"BBox: {bbox_loss.item():.4f}"
+            )
 
     # =============================================================
     # epoch 平均 loss
     # =============================================================
 
     if num_batches == 0:
-        return {
-            "loss": 0.0,
-            "cls_loss": 0.0,
-            "bbox_loss": 0.0,
-        }
+        raise ValueError("这一轮没有可训练的 RoI，请检查 GT 和 proposals")
 
     return {
         "loss": total_loss_sum / num_batches,

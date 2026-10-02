@@ -34,7 +34,11 @@ def multi_task_loss(cls_scores, bbox_deltas, labels, bbox_targets):
         bbox_targets_pos = bbox_targets[pos_indices]
         # [num_pos, 4]
 
-        bbox_loss = F.smooth_l1_loss(pred_bbox, bbox_targets_pos)
+        # 每个正样本的 4 个坐标损失相加，再除以本批全部 RoI 数。
+        # 背景 RoI 不参与框回归，但仍在分母中。
+        bbox_loss = F.smooth_l1_loss(
+            pred_bbox, bbox_targets_pos, reduction="sum"
+        ) / len(labels)
 
     else:
         bbox_loss = bbox_deltas.sum() * 0.0

@@ -1,7 +1,7 @@
 import os
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from torchvision.datasets import VOCDetection
 from torchvision.transforms import functional as F
 from torchvision.transforms import Normalize
@@ -40,7 +40,9 @@ class FastRCNNVOCDataset(Dataset):
         proposal_dir,
         year="2007",
         image_set="trainval",
-        image_size=(600, 800),  # (H, W)
+        short_side=600,
+        max_side=1000,
+        horizontal_flip=False,
         download=False,
     ):
         super().__init__()
@@ -54,8 +56,9 @@ class FastRCNNVOCDataset(Dataset):
 
         self.proposal_dir = proposal_dir
 
-        self.new_h = image_size[0]
-        self.new_w = image_size[1]  # H=600, W=800
+        self.short_side = short_side
+        self.max_side = max_side
+        self.horizontal_flip = horizontal_flip
 
         # VGG16 ImageNet normalization
         self.normalize = Normalize(
@@ -87,7 +90,7 @@ class FastRCNNVOCDataset(Dataset):
         # 2. 读取 GT
         # =====================================================
 
-        objects = annotation["object"]
+        objects = annotation.get("object", [])
 
         # 为了兼容只有一个 object 的情况
         if isinstance(objects, dict):
@@ -161,7 +164,7 @@ class FastRCNNVOCDataset(Dataset):
         proposals = torch.load(
             proposal_path,
             map_location="cpu",
-        ).float()
+        ).float().reshape(-1, 4)
 
         # proposals 已经是：
         # [x1, y1, x2, y2]
@@ -169,20 +172,28 @@ class FastRCNNVOCDataset(Dataset):
         # 而且是原始图片坐标系
 
         # =====================================================
-        # 4. resize 图片
+        # 4. 等比例 resize 图片：短边约 600，长边不超过 1000。
+        # 不强行拉成 600×800，否则物体形状会变。
         # =====================================================
+
+        scale = min(
+            self.short_side / min(old_h, old_w),
+            self.max_side / max(old_h, old_w),
+        )
+        new_h = round(old_h * scale)
+        new_w = round(old_w * scale)
 
         image = F.resize(
             image,
-            [self.new_h, self.new_w],
+            [new_h, new_w],
         )
 
         # =====================================================
         # 5. GT / proposal 跟着 resize
         # =====================================================
 
-        scale_x = self.new_w / old_w
-        scale_y = self.new_h / old_h
+        scale_x = new_w / old_w
+        scale_y = new_h / old_h
 
         # GT
         if len(gt_boxes) > 0:
@@ -198,13 +209,13 @@ class FastRCNNVOCDataset(Dataset):
         # 6. 限制坐标范围
         # =====================================================
 
-        gt_boxes[:, [0, 2]] = gt_boxes[:, [0, 2]].clamp(0, self.new_w)
+        gt_boxes[:, [0, 2]] = gt_boxes[:, [0, 2]].clamp(0, new_w)
 
-        gt_boxes[:, [1, 3]] = gt_boxes[:, [1, 3]].clamp(0, self.new_h)
+        gt_boxes[:, [1, 3]] = gt_boxes[:, [1, 3]].clamp(0, new_h)
 
-        proposals[:, [0, 2]] = proposals[:, [0, 2]].clamp(0, self.new_w)
+        proposals[:, [0, 2]] = proposals[:, [0, 2]].clamp(0, new_w)
 
-        proposals[:, [1, 3]] = proposals[:, [1, 3]].clamp(0, self.new_h)
+        proposals[:, [1, 3]] = proposals[:, [1, 3]].clamp(0, new_h)
 
         # =====================================================
         # 7. 过滤非法 proposal
@@ -216,6 +227,20 @@ class FastRCNNVOCDataset(Dataset):
         valid = (widths > 1) & (heights > 1)
 
         proposals = proposals[valid]
+
+        # 只在训练集随机左右翻转。图片、GT 和 proposals 必须一起翻转。
+        if self.horizontal_flip and torch.rand(1).item() < 0.5:
+            image = F.hflip(image)
+            if len(gt_boxes) > 0:
+                old_x1 = gt_boxes[:, 0].clone()
+                old_x2 = gt_boxes[:, 2].clone()
+                gt_boxes[:, 0] = new_w - old_x2
+                gt_boxes[:, 2] = new_w - old_x1
+            if len(proposals) > 0:
+                old_x1 = proposals[:, 0].clone()
+                old_x2 = proposals[:, 2].clone()
+                proposals[:, 0] = new_w - old_x2
+                proposals[:, 2] = new_w - old_x1
 
         # =====================================================
         # 8. PIL -> Tensor + VGG normalization
@@ -241,13 +266,14 @@ class FastRCNNVOCDataset(Dataset):
 
 def detection_collate_fn(batch):
 
-    # 因为我们统一 resize 成 600×800，
-    # image 可以直接 stack
-
-    images = torch.stack(
-        [item["image"] for item in batch],
-        dim=0,
-    )
+    # 等比例缩放后图片大小可能不同，补 0 后才能组成一个 batch。
+    # 补的 0 是归一化后的 0，不影响真实图片中的坐标。
+    max_h = max(item["image"].shape[1] for item in batch)
+    max_w = max(item["image"].shape[2] for item in batch)
+    images = torch.zeros(len(batch), 3, max_h, max_w)
+    for i, item in enumerate(batch):
+        image = item["image"]
+        images[i, :, : image.shape[1], : image.shape[2]] = image
 
     # proposals / GT 数量每张图不同
     # 所以保持 list
@@ -275,7 +301,8 @@ if __name__ == "__main__":
         proposal_dir="./data/VOCdevkit/VOC2007/SelectiveSearchProposals",
         year="2007",
         image_set="trainval",
-        image_size=(600, 800),
+        short_side=600,
+        max_side=1000,
     )
 
     print("dataset:", len(dataset))

@@ -9,9 +9,9 @@ def selective_search(image_bgr, mode="fast", max_proposals=2000):
     ss.setBaseImage(image_bgr)
 
     if mode == "quality":
-        ss.switchToSelectiveSearchFast()
-    else:
         ss.switchToSelectiveSearchQuality()
+    else:
+        ss.switchToSelectiveSearchFast()
 
     rects = ss.process()
     # rects 每个是 (x, y, w, h)

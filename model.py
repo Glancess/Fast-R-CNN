@@ -1,15 +1,16 @@
-import math
-
 import torch
 import torch.nn as nn
-from torchvision.models import vgg16
+from torchvision.models import VGG16_Weights, vgg16
 from utils.RoIPool import RoIPool
 
 
 class FastRCNN(nn.Module):
-    def __init__(self):
+    def __init__(self, pretrained=True):
         super().__init__()
-        vgg = vgg16(pretrained=True)
+        # 用 ImageNet 预训练的 VGG16 初始化特征提取部分。
+        # 加载自己训练好的 checkpoint 时，不必再次下载预训练权重。
+        weights = VGG16_Weights.DEFAULT if pretrained else None
+        vgg = vgg16(weights=weights)
 
         self.backbone = vgg.features[:-1]
         self.classifier = vgg.classifier[:-1]
@@ -20,18 +21,24 @@ class FastRCNN(nn.Module):
         self.bboxhead = nn.Linear(4096, 4 * 20)
         self.flatten = nn.Flatten()
 
-    def forward(self, image, rois):
-        x = self.backbone(image)
-        print("Backbone output shape:", x.shape)  # Debugging line
-        x = self.roi_pool(x, rois)
-        print("RoI Pool output shape:", x.shape)  # Debugging line
+        # 新增的两个输出层没有预训练权重，需要单独初始化。
+        nn.init.normal_(self.clshead.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(self.clshead.bias)
+        nn.init.normal_(self.bboxhead.weight, mean=0.0, std=0.001)
+        nn.init.zeros_(self.bboxhead.bias)
+
+    def predict_rois(self, features, rois):
+        """把一批 RoI 的特征变成分类分数和框偏移。"""
+        x = self.roi_pool(features, rois)
         x = self.flatten(x)
-        print("Flatten output shape:", x.shape)  # Debugging line
         x = self.classifier(x)
-        print("Classifier output shape:", x.shape)  # Debugging line
         cls_scores = self.clshead(x)
         bbox_deltas = self.bboxhead(x)
         return cls_scores, bbox_deltas
+
+    def forward(self, image, rois):
+        features = self.backbone(image)
+        return self.predict_rois(features, rois)
 
 
 if __name__ == "__main__":

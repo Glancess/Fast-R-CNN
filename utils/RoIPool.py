@@ -1,7 +1,5 @@
-import math
-import torch
 import torch.nn as nn
-from utils.map_roi_to_feature_map import map_roi_to_feature_map
+from torchvision.ops import roi_pool
 
 
 class RoIPool(nn.Module):
@@ -22,46 +20,16 @@ class RoIPool(nn.Module):
         注意 rois 坐标是原图坐标
         """
 
-        outputs = []
-
-        for roi in rois:
-            batch_idx = int(roi[0].item())
-
-            # 1. 原图坐标 -> feature map 坐标
-            x1, y1, x2, y2 = map_roi_to_feature_map(
-                (roi[1].item(), roi[2].item(), roi[3].item(), roi[4].item()),
-                self.spatial_scale,
+        if len(rois) == 0:
+            return feature.new_zeros(
+                (0, feature.shape[1], self.output_h, self.output_w)
             )
 
-            roi_w = x2 - x1
-            roi_h = y2 - y1
-
-            bin_w = roi_w / self.output_w
-            bin_h = roi_h / self.output_h
-
-            pooled = torch.zeros(
-                feature.shape[1],
-                self.output_h,
-                self.output_w,
-                device=feature.device,
-                dtype=feature.dtype,
-            )  # 用来存放每个 ROI 的池化结果
-
-            for i in range(self.output_h):
-                for j in range(self.output_w):
-
-                    xs = math.floor(x1 + j * bin_w)
-                    xe = math.ceil(x1 + (j + 1) * bin_w)
-                    ys = math.floor(y1 + i * bin_h)
-                    ye = math.ceil(y1 + (i + 1) * bin_h)
-                    # 防止越界
-                    xs = max(0, min(xs, feature.shape[3]))
-                    xe = max(0, min(xe, feature.shape[3]))
-                    ys = max(0, min(ys, feature.shape[2]))
-                    ye = max(0, min(ye, feature.shape[2]))
-
-                    region = feature[batch_idx, :, ys:ye, xs:xe]
-                    if region.numel() > 0:
-                        pooled[:, i, j] = region.amax(dim=(-2, -1))
-            outputs.append(pooled)
-        return torch.stack(outputs, dim=0)
+        # 和手写版本做同一件事：每个 RoI 池化为 7×7。
+        # 现成算子避免逐个 RoI、逐个格子运行 Python 循环，也支持反向传播。
+        return roi_pool(
+            feature,
+            rois,
+            output_size=(self.output_h, self.output_w),
+            spatial_scale=self.spatial_scale,
+        )
